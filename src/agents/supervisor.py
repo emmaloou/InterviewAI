@@ -1,7 +1,7 @@
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.sqlite import SqliteSaver
 from typing import TypedDict, Annotated, List, Dict
 import operator
+import concurrent.futures
 
 # Définition de l'état partagé
 class InterviewPrepState(TypedDict):
@@ -43,10 +43,11 @@ class InterviewPrepSupervisor:
         workflow.add_node("generate_tips", self.generate_tips_node)
         
         # Définir le flux
-        workflow.set_entry_point("analyze_cv")
+        # Exécuter analyze_cv et analyze_jd en parallèle pour gagner du temps
+        workflow.set_entry_point("analyze_parallel")
+        workflow.add_node("analyze_parallel", self.analyze_parallel_node)
         
-        workflow.add_edge("analyze_cv", "analyze_jd")
-        workflow.add_edge("analyze_jd", "research_company")
+        workflow.add_edge("analyze_parallel", "research_company")
         workflow.add_edge("research_company", "generate_questions")
         workflow.add_edge("generate_questions", "human_review")
         
@@ -76,41 +77,198 @@ class InterviewPrepSupervisor:
         
         return workflow.compile(checkpointer=self.memory)
     
-    def analyze_cv_node(self, state: InterviewPrepState) -> InterviewPrepState:
-        """Nœud d'analyse CV"""
-        result = self.agents["cv_analyzer"].analyze(state["cv_text"])
+    def get_graph(self):
+        """Retourne le graph compilé"""
+        return self.graph
+    
+    def analyze_parallel_node(self, state: InterviewPrepState) -> InterviewPrepState:
+        """Nœud qui exécute l'analyse CV et JD en parallèle pour gagner du temps"""
+        def analyze_cv():
+            try:
+                if not state.get("cv_text") or not state["cv_text"].strip():
+                    return {}, "CV text is empty"
+                result = self.agents["cv_analyzer"].analyze(state["cv_text"])
+                if result.get("success") and result.get("analysis"):
+                    return result.get("analysis", {}), ""
+                return {}, result.get("error", "CV Analysis failed")
+            except Exception as e:
+                return {}, f"CV Analysis exception: {str(e)}"
         
-        if result["success"]:
-            # Stocker dans vector DB
-            self.vector_store.add_documents(
-                "cv_data",
-                [state["cv_text"]],
-                [{"type": "cv", "analysis": result["analysis"]}]
-            )
+        def analyze_jd():
+            try:
+                if not state.get("jd_text") or not state["jd_text"].strip():
+                    return {}, "JD text is empty"
+                result = self.agents["jd_analyzer"].analyze(state["jd_text"])
+                if result.get("success") and result.get("analysis"):
+                    return result.get("analysis", {}), ""
+                return {}, result.get("error", "JD Analysis failed")
+            except Exception as e:
+                return {}, f"JD Analysis exception: {str(e)}"
+        
+        # Exécuter les deux analyses en parallèle
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            cv_future = executor.submit(analyze_cv)
+            jd_future = executor.submit(analyze_jd)
+            
+            cv_analysis, cv_error = cv_future.result()
+            jd_analysis, jd_error = jd_future.result()
+        
+        # Stocker dans vector DB si succès
+        if cv_analysis:
+            try:
+                self.vector_store.add_documents(
+                    "cv_data",
+                    [state["cv_text"]],
+                    [{"type": "cv", "analysis": cv_analysis}]
+                )
+            except Exception:
+                pass
+        
+        if jd_analysis:
+            try:
+                self.vector_store.add_documents(
+                    "jd_data",
+                    [state["jd_text"]],
+                    [{"type": "jd", "analysis": jd_analysis}]
+                )
+            except Exception:
+                pass
+        
+        # Combiner les erreurs
+        errors = []
+        if cv_error:
+            errors.append(f"CV: {cv_error}")
+        if jd_error:
+            errors.append(f"JD: {jd_error}")
         
         return {
             **state,
-            "cv_analysis": result["analysis"],
-            "error": "" if result["success"] else result.get("error", "")
+            "cv_analysis": cv_analysis,
+            "jd_analysis": jd_analysis,
+            "error": "; ".join(errors) if errors else ""
         }
+    
+    def analyze_cv_node(self, state: InterviewPrepState) -> InterviewPrepState:
+        """Nœud d'analyse CV"""
+        try:
+            # Vérifier que cv_text n'est pas vide
+            if not state.get("cv_text") or not state["cv_text"].strip():
+                return {
+                    **state,
+                    "cv_analysis": {},
+                    "error": "CV text is empty"
+                }
+            
+            result = self.agents["cv_analyzer"].analyze(state["cv_text"])
+            
+            # Debug: vérifier la structure de result
+            if not isinstance(result, dict):
+                return {
+                    **state,
+                    "cv_analysis": {},
+                    "error": f"CV Analysis returned invalid result: {type(result)}"
+                }
+            
+            # Vérifier que result contient bien les données
+            if not result.get("success", False):
+                error_msg = result.get("error", "Unknown error")
+                return {
+                    **state,
+                    "cv_analysis": {},
+                    "error": f"CV Analysis failed: {error_msg}"
+                }
+            
+            analysis = result.get("analysis", {})
+            
+            # Vérifier que analysis n'est pas vide
+            if not analysis or (isinstance(analysis, dict) and len(analysis) == 0):
+                return {
+                    **state,
+                    "cv_analysis": {},
+                    "error": "CV Analysis returned empty result"
+                }
+            
+            if result["success"] and analysis:
+                # Stocker dans vector DB
+                try:
+                    self.vector_store.add_documents(
+                        "cv_data",
+                        [state["cv_text"]],
+                        [{"type": "cv", "analysis": analysis}]
+                    )
+                except Exception as e:
+                    # Ne pas bloquer si le vector store échoue
+                    pass
+            
+            return {
+                **state,
+                "cv_analysis": analysis,
+                "error": ""
+            }
+        except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
+            return {
+                **state,
+                "cv_analysis": {},
+                "error": f"CV Analysis exception: {str(e)}\n{error_trace}"
+            }
     
     def analyze_jd_node(self, state: InterviewPrepState) -> InterviewPrepState:
         """Nœud d'analyse JD"""
-        result = self.agents["jd_analyzer"].analyze(state["jd_text"])
-        
-        if result["success"]:
-            # Stocker dans vector DB
-            self.vector_store.add_documents(
-                "jd_data",
-                [state["jd_text"]],
-                [{"type": "jd", "analysis": result["analysis"]}]
-            )
-        
-        return {
-            **state,
-            "jd_analysis": result["analysis"],
-            "error": "" if result["success"] else result.get("error", "")
-        }
+        try:
+            result = self.agents["jd_analyzer"].analyze(state["jd_text"])
+            
+            # Debug: vérifier la structure de result
+            if not isinstance(result, dict):
+                return {
+                    **state,
+                    "jd_analysis": {},
+                    "error": f"JD Analysis returned invalid result: {type(result)}"
+                }
+            
+            # Vérifier que result contient bien les données
+            if not result.get("success", False):
+                error_msg = result.get("error", "Unknown error")
+                return {
+                    **state,
+                    "jd_analysis": {},
+                    "error": f"JD Analysis failed: {error_msg}"
+                }
+            
+            analysis = result.get("analysis", {})
+            
+            # Vérifier que analysis n'est pas vide
+            if not analysis or (isinstance(analysis, dict) and len(analysis) == 0):
+                return {
+                    **state,
+                    "jd_analysis": {},
+                    "error": "JD Analysis returned empty result"
+                }
+            
+            if result["success"] and analysis:
+                # Stocker dans vector DB
+                try:
+                    self.vector_store.add_documents(
+                        "jd_data",
+                        [state["jd_text"]],
+                        [{"type": "jd", "analysis": analysis}]
+                    )
+                except Exception as e:
+                    # Ne pas bloquer si le vector store échoue
+                    pass
+            
+            return {
+                **state,
+                "jd_analysis": analysis,
+                "error": ""
+            }
+        except Exception as e:
+            return {
+                **state,
+                "jd_analysis": {},
+                "error": f"JD Analysis exception: {str(e)}"
+            }
     
     def research_company_node(self, state: InterviewPrepState) -> InterviewPrepState:
         """Nœud de recherche entreprise"""

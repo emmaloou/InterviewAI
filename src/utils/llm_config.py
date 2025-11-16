@@ -8,13 +8,16 @@ load_dotenv()
 
 class LLMConfig:
     @staticmethod
-    def get_llm(temperature=0.7, model=None):
-        """Initialise le LLM"""
+    def get_llm(temperature=0.3, model=None):
+        """Initialise le LLM avec température réduite pour des réponses plus rapides"""
         model_name = model or os.getenv("LLM_MODEL", "llama3.1:8b")
         return Ollama(
             base_url=os.getenv("OLLAMA_BASE_URL"),
             model=model_name,
-            temperature=temperature
+            temperature=temperature,
+            num_predict=512,  # Limiter la longueur des réponses pour plus de rapidité
+            top_p=0.9,
+            top_k=40
         )
     
     @staticmethod

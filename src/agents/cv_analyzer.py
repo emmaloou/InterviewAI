@@ -6,21 +6,12 @@ class CVAnalyzerAgent:
     def __init__(self, llm):
         self.llm = llm
         self.prompt = PromptTemplate.from_template(
-            """Tu es un expert en analyse de CV.
-            
-            Analyse ce CV et extrais les informations clés:
-            {cv_text}
-            
-            Retourne un JSON avec:
-            - skills: liste des compétences
-            - experience_years: nombre d'années d'expérience
-            - experience_domains: domaines d'expertise
-            - education: formation
-            - strengths: 3-5 points forts
-            - areas_for_improvement: 2-3 points à améliorer
-            - summary: résumé en 2-3 phrases
-            
-            JSON:"""
+            """Analyse ce CV et retourne UNIQUEMENT un JSON valide (sans texte avant/après):
+{cv_text}
+
+JSON avec: skills (liste), experience_years (nombre), experience_domains (liste), education (texte), strengths (3-5 points), areas_for_improvement (2-3 points), summary (2-3 phrases).
+
+JSON:"""
         )
     
     def analyze(self, cv_text: str) -> Dict:

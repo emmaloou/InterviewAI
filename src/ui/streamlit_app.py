@@ -2,6 +2,8 @@ import streamlit as st
 from pathlib import Path
 import sys
 import json
+import os
+import requests
 from datetime import datetime
 
 # Ajouter le répertoire parent au path
@@ -17,7 +19,7 @@ from src.tools.document_parser import DocumentParser
 from src.tools.web_search import WebSearchTool
 from src.tools.vector_store import VectorStore
 from src.utils.llm_config import LLMConfig
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import MemorySaver
 
 # Configuration de la page
 st.set_page_config(
@@ -89,6 +91,29 @@ def initialize_agents():
     
     with st.spinner("🚀 Initialisation des agents IA..."):
         try:
+            # Vérifier que Ollama est disponible
+            from dotenv import load_dotenv
+            load_dotenv()
+            
+            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+            try:
+                response = requests.get(f"{ollama_url}/api/tags", timeout=2)
+                if response.status_code != 200:
+                    raise Exception("Ollama is not responding correctly")
+            except Exception as e:
+                st.error("""
+                ❌ **Ollama n'est pas en cours d'exécution !**
+                
+                Pour démarrer Ollama :
+                1. Ouvrez un terminal
+                2. Exécutez : `ollama serve`
+                3. Dans un autre terminal, téléchargez le modèle : `ollama pull llama3.1:8b`
+                4. Rechargez cette page
+                
+                Si Ollama n'est pas installé, téléchargez-le depuis : https://ollama.com
+                """)
+                st.stop()
+            
             # LLM et embeddings
             llm = LLMConfig.get_llm()
             embeddings = LLMConfig.get_embeddings()
@@ -106,11 +131,17 @@ def initialize_agents():
                 "interview_coach": InterviewCoachAgent(llm)
             }
             
-            # Memory saver
-            memory = SqliteSaver.from_conn_string(":memory:")
+            # Memory saver - utiliser MemorySaver au lieu de SqliteSaver pour éviter le problème du context manager
+            # MemorySaver n'est pas un context manager et peut être utilisé directement
+            memory = MemorySaver()
             
-            # Supervisor
+            # Supervisor - passer le checkpointer directement
             supervisor = InterviewPrepSupervisor(agents, vector_store, memory)
+            
+            # Vérifier que la méthode get_graph existe
+            if not hasattr(supervisor, 'get_graph'):
+                st.error("❌ Erreur: La méthode get_graph n'est pas disponible. Veuillez redémarrer Streamlit.")
+                st.stop()
             
             # Stocker dans session state
             st.session_state.supervisor = supervisor
@@ -235,27 +266,115 @@ def analysis_section():
         st.warning("⚠️ Aucune donnée à analyser")
         return
     
-    # Exécuter le workflow jusqu'au point de validation humaine
-    with st.spinner("🤖 Les agents travaillent sur votre profil..."):
-        try:
-            supervisor = st.session_state.supervisor
-            config = {"configurable": {"thread_id": "interview_prep_1"}}
-            
-            # Exécuter le workflow
-            result = None
-            for state in supervisor.graph.stream(st.session_state.workflow_state, config):
-                result = state
+    # Vérifier si l'analyse a déjà été effectuée
+    state = st.session_state.workflow_state
+    analysis_done = (
+        state.get("cv_analysis") and state["cv_analysis"] and
+        state.get("jd_analysis") and state["jd_analysis"] and
+        state.get("questions") and len(state.get("questions", [])) > 0
+    )
+    
+    # Exécuter le workflow seulement si l'analyse n'est pas encore faite
+    if not analysis_done:
+        # Exécuter le workflow jusqu'au point de validation humaine
+        with st.spinner("🤖 Les agents travaillent sur votre profil..."):
+            try:
+                supervisor = st.session_state.supervisor
+                config = {"configurable": {"thread_id": "interview_prep_1"}}
                 
-                # Arrêter au point de validation humaine
-                if list(result.values())[0].get("next_step") == "awaiting_human_input":
-                    break
-            
-            if result:
-                st.session_state.workflow_state = list(result.values())[0]
+                # Exécuter le workflow
+                # Avec MemorySaver, on peut utiliser le graph directement sans context manager
+                graph = supervisor.get_graph()
+                result = None
+                last_state = None
+                
+                # Exécuter le workflow et accumuler l'état
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                node_names = ["analyze_parallel", "research_company", "generate_questions", "human_review"]
+                current_step = 0
+                
+                for state_update in graph.stream(st.session_state.workflow_state, config):
+                    result = state_update
+                    # state_update est un dict avec les noms des nœuds comme clés
+                    # Chaque valeur est l'état complet après l'exécution de ce nœud
+                    if result:
+                        # Récupérer l'état du dernier nœud exécuté
+                        # Dans LangGraph, chaque itération retourne un dict avec une clé (nom du nœud)
+                        # et la valeur est l'état complet après ce nœud
+                        node_name = list(result.keys())[0] if result.keys() else None
+                        node_state = list(result.values())[0] if result.values() else None
+                        
+                        if node_state:
+                            last_state = node_state
+                            
+                            # Mettre à jour la barre de progression
+                            if node_name in node_names:
+                                current_step = node_names.index(node_name) + 1
+                                progress = current_step / len(node_names)
+                                progress_bar.progress(progress)
+                                
+                                step_names = {
+                                    "analyze_parallel": "📄 Analyse CV et JD en parallèle...",
+                                    "research_company": "🔍 Recherche d'informations sur l'entreprise...",
+                                    "generate_questions": "❓ Génération des questions d'entretien...",
+                                    "human_review": "✅ Analyse terminée !"
+                                }
+                                status_text.text(step_names.get(node_name, f"Exécution de {node_name}..."))
+                            
+                            # Debug: afficher le nœud exécuté et son état (masqué par défaut)
+                            # with st.expander(f"🔍 Debug: Node {node_name}", expanded=False):
+                            #     st.json({
+                            #         "node": node_name,
+                            #         "has_cv_analysis": bool(node_state.get("cv_analysis")),
+                            #         "has_jd_analysis": bool(node_state.get("jd_analysis")),
+                            #         "has_company_info": bool(node_state.get("company_info")),
+                            #         "questions_count": len(node_state.get("questions", [])),
+                            #         "error": node_state.get("error", "")
+                            #     })
+                            
+                            # Arrêter au point de validation humaine
+                            if node_state.get("next_step") == "awaiting_human_input":
+                                break
+                
+                progress_bar.progress(1.0)
+                status_text.text("✅ Analyse terminée !")
+                
+                # Mettre à jour l'état avec le dernier état récupéré
+                if last_state:
+                    # Fusionner avec l'état initial pour préserver toutes les données
+                    st.session_state.workflow_state = {**st.session_state.workflow_state, **last_state}
+                elif result:
+                    # Fallback: utiliser le dernier état du dernier nœud
+                    node_state = list(result.values())[0] if result.values() else None
+                    if node_state:
+                        st.session_state.workflow_state = {**st.session_state.workflow_state, **node_state}
+                
+                # Debug: afficher les clés de l'état pour vérifier
+                if st.session_state.workflow_state:
+                    debug_info = {
+                        "cv_analysis": bool(st.session_state.workflow_state.get("cv_analysis")),
+                        "jd_analysis": bool(st.session_state.workflow_state.get("jd_analysis")),
+                        "company_info": bool(st.session_state.workflow_state.get("company_info")),
+                        "questions": len(st.session_state.workflow_state.get("questions", [])),
+                        "error": st.session_state.workflow_state.get("error", "")
+                    }
+                    # Afficher en mode debug temporairement
+                    with st.expander("🔍 Debug Info", expanded=False):
+                        st.json(debug_info)
+                        st.json({k: type(v).__name__ for k, v in st.session_state.workflow_state.items()})
+                        # Afficher l'erreur si présente
+                        if st.session_state.workflow_state.get("error"):
+                            st.error(f"Erreur dans le workflow: {st.session_state.workflow_state.get('error')}")
         
-        except Exception as e:
-            st.error(f"❌ Erreur: {str(e)}")
-            return
+            except Exception as e:
+                st.error(f"❌ Erreur: {str(e)}")
+                import traceback
+                st.error(f"Traceback: {traceback.format_exc()}")
+                return
+    else:
+        # L'analyse est déjà faite, utiliser l'état existant
+        state = st.session_state.workflow_state
     
     state = st.session_state.workflow_state
     
@@ -266,56 +385,87 @@ def analysis_section():
     tab1, tab2, tab3, tab4 = st.tabs(["📊 Analyse CV", "📋 Analyse Poste", "🏢 Info Entreprise", "❓ Questions"])
     
     with tab1:
-        if state.get("cv_analysis"):
+        if state.get("cv_analysis") and state["cv_analysis"]:
             st.markdown("### Résumé de votre profil")
             cv_analysis = state["cv_analysis"]
             
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown("**🎯 Points Forts:**")
-                for strength in cv_analysis.get("strengths", []):
-                    st.markdown(f"- {strength}")
+                strengths = cv_analysis.get("strengths", [])
+                if strengths:
+                    for strength in strengths:
+                        st.markdown(f"- {strength}")
+                else:
+                    st.info("Aucun point fort identifié")
             
             with col2:
                 st.markdown("**📈 Axes d'Amélioration:**")
-                for area in cv_analysis.get("areas_for_improvement", []):
-                    st.markdown(f"- {area}")
+                areas = cv_analysis.get("areas_for_improvement", [])
+                if areas:
+                    for area in areas:
+                        st.markdown(f"- {area}")
+                else:
+                    st.info("Aucun axe d'amélioration identifié")
             
             st.markdown("**💼 Compétences:**")
             skills = cv_analysis.get("skills", [])
             st.write(", ".join(skills) if skills else "Non spécifié")
             
-            st.info(cv_analysis.get("summary", ""))
+            summary = cv_analysis.get("summary", "")
+            if summary:
+                st.info(summary)
+        else:
+            st.warning("⚠️ L'analyse du CV n'est pas encore disponible. Le workflow est peut-être en cours d'exécution.")
+            st.json(state.get("cv_analysis", {}))
     
     with tab2:
-        if state.get("jd_analysis"):
+        if state.get("jd_analysis") and state["jd_analysis"]:
             jd_analysis = state["jd_analysis"]
             
             st.markdown(f"### {jd_analysis.get('job_title', 'Poste')}")
             st.markdown(f"**Niveau:** {jd_analysis.get('seniority_level', 'N/A')}")
             
             st.markdown("**🔧 Compétences Requises:**")
-            for skill in jd_analysis.get("required_skills", []):
-                st.markdown(f"- {skill}")
+            skills = jd_analysis.get("required_skills", [])
+            if skills:
+                for skill in skills:
+                    st.markdown(f"- {skill}")
+            else:
+                st.info("Aucune compétence requise identifiée")
             
             st.markdown("**📝 Responsabilités Principales:**")
-            for resp in jd_analysis.get("key_responsibilities", [])[:5]:
-                st.markdown(f"- {resp}")
+            responsibilities = jd_analysis.get("key_responsibilities", [])
+            if responsibilities:
+                for resp in responsibilities[:5]:
+                    st.markdown(f"- {resp}")
+            else:
+                st.info("Aucune responsabilité identifiée")
+        else:
+            st.warning("⚠️ L'analyse du poste n'est pas encore disponible.")
+            st.json(state.get("jd_analysis", {}))
     
     with tab3:
-        if state.get("company_info"):
+        if state.get("company_info") and state["company_info"]:
             company_info = state["company_info"]
             
-            st.markdown(f"### {company_info.get('company_name', 'Entreprise')}")
+            st.markdown(f"### {company_info.get('company_name', state.get('company_name', 'Entreprise'))}")
             st.markdown(f"**Activité:** {company_info.get('main_activity', 'N/A')}")
             
             st.markdown("**📰 Actualités Récentes:**")
-            for news in company_info.get("recent_news", []):
-                st.markdown(f"- {news}")
+            news = company_info.get("recent_news", [])
+            if news:
+                for item in news:
+                    st.markdown(f"- {item}")
+            else:
+                st.info("Aucune actualité récente disponible")
             
             st.markdown("**💡 Valeurs:**")
             values = company_info.get("values", [])
             st.write(", ".join(values) if values else "Non disponible")
+        else:
+            st.warning("⚠️ Les informations sur l'entreprise ne sont pas encore disponibles.")
+            st.json(state.get("company_info", {}))
     
     with tab4:
         if state.get("questions"):
@@ -385,7 +535,9 @@ def tips_section():
             config = {"configurable": {"thread_id": "interview_prep_1"}}
             
             # Continuer le workflow
-            for result in supervisor.graph.stream(state, config):
+            # Avec MemorySaver, on peut utiliser le graph directement sans context manager
+            graph = supervisor.get_graph()
+            for result in graph.stream(state, config):
                 st.session_state.workflow_state = list(result.values())[0]
             
             state = st.session_state.workflow_state

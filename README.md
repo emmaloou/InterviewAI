@@ -182,26 +182,4 @@ docker build -t interview-master-ai .
 docker run -p 8501:8501 --env-file .env interview-master-ai
 ```
 
-## 🤝 Contribution
 
-1. Fork le projet
-2. Créer une branche (`git checkout -b feature/AmazingFeature`)
-3. Commit (`git commit -m 'Add AmazingFeature'`)
-4. Push (`git push origin feature/AmazingFeature`)
-5. Ouvrir une Pull Request
-
-## 📝 License
-
-MIT License
-
-## 👥 Auteurs
-
-Votre Équipe
-
-## 🙏 Remerciements
-
-- LangChain & LangGraph
-- Anthropic Claude
-- Streamlit
-- Tavily
-- Langfuse

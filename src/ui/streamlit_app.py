@@ -436,7 +436,7 @@ def tips_section():
 
 def interview_simulation_section():
     """Section de simulation d'entretien"""
-    st.markdown('<div class="step-header"><h2>🎭 Étape 4: Simulation d'Entretien</h2></div>', 
+    st.markdown('<div class="step-header"><h2>🎭 Étape 4: Simulation d\'Entretien</h2></div>',
                 unsafe_allow_html=True)
     
     state = st.session_state.workflow_state

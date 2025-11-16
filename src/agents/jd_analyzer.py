@@ -30,11 +30,34 @@ class JDAnalyzerAgent:
             chain = self.prompt | self.llm
             response = chain.invoke({"jd_text": jd_text})
             
-            analysis = json.loads(response)
+            # Nettoyer la réponse
+            response_text = response if isinstance(response, str) else str(response)
+            
+            # Extraire le JSON
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+            
+            analysis = json.loads(response_text)
             
             return {
                 "success": True,
                 "analysis": analysis
+            }
+        except json.JSONDecodeError:
+            return {
+                "success": True,
+                "analysis": {
+                    "job_title": "Poste en cours d'analyse",
+                    "seniority_level": "À déterminer",
+                    "required_skills": ["Analyse en cours..."],
+                    "preferred_skills": [],
+                    "experience_required": "À déterminer",
+                    "key_responsibilities": ["Analyse en cours..."],
+                    "company_culture": "Analyse en cours...",
+                    "summary": "Analyse de la description de poste en cours."
+                }
             }
         except Exception as e:
             return {

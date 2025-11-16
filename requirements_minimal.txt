@@ -1,0 +1,37 @@
+# === CORE DEPENDENCIES (versions compatibles Python 3.12) ===
+langchain==0.2.16
+langgraph==0.2.28
+langchain-community==0.2.16
+pydantic==2.9.2
+pydantic-settings==2.5.2
+
+# === LLM (Ollama local) ===
+ollama==0.3.3
+
+# === Vector Store ===
+chromadb==0.5.5
+sentence-transformers==3.1.1
+
+# === Document Processing ===
+pypdf2==3.0.1
+python-docx==1.1.2
+
+# === Web Search ===
+tavily-python==0.5.0
+
+# === UI ===
+streamlit==1.39.0
+
+# === Utilities ===
+python-dotenv==1.0.1
+requests==2.32.3
+
+# === Monitoring ===
+langfuse==2.51.3
+langsmith==0.1.137
+
+# === Database ===
+sqlalchemy==2.0.35
+
+# === Testing ===
+pytest==8.3.3

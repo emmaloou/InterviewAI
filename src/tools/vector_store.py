@@ -1,7 +1,7 @@
 from langchain_community.vectorstores import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from typing import List
+from typing import List,Dict
 import os
 
 class VectorStore:

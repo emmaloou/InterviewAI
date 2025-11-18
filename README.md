@@ -45,7 +45,7 @@ Assistant IA multi-agents pour la préparation d'entretiens d'embauche avec anal
 ## 📋 Prérequis
 
 - Python 3.10+
-- Ollama (pour LLM local) OU clés API (OpenAI, Groq, etc.)
+- Clé API OpenAI (ou fournisseur compatible via OpenAI API)
 - Compte Tavily (API search gratuite)
 - Compte Langfuse (monitoring)
 
@@ -79,9 +79,11 @@ cp .env.example .env
 
 Éditer `.env`:
 ```env
-# LLM
-OLLAMA_BASE_URL=http://localhost:11434
-LLM_MODEL=llama3.1:8b
+# OpenAI
+OPENAI_API_KEY=votre_cle_openai
+OPENAI_API_BASE=https://api.openai.com/v1  # optionnel (proxy/Azure)
+LLM_MODEL=gpt-4o-mini
+EMBEDDING_MODEL=text-embedding-3-small
 
 # Tavily
 TAVILY_API_KEY=votre_clé
@@ -92,12 +94,10 @@ LANGFUSE_SECRET_KEY=votre_clé
 LANGFUSE_HOST=https://cloud.langfuse.com
 ```
 
-### 5. Installer et lancer Ollama (si local)
-```bash
-# Télécharger depuis https://ollama.com
-ollama pull llama3.1:8b
-ollama serve
-```
+### 5. Configurer OpenAI
+- Créez une clé API sur [platform.openai.com](https://platform.openai.com/)
+- Ajoutez `OPENAI_API_KEY` (et `OPENAI_API_BASE` si nécessaire) dans votre `.env`
+- Rechargez l'application Streamlit
 
 ## 🎮 Utilisation
 

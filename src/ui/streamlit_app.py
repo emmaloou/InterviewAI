@@ -3,7 +3,6 @@ from pathlib import Path
 import sys
 import json
 import os
-import requests
 from datetime import datetime
 
 # Ajouter le répertoire parent au path
@@ -19,7 +18,10 @@ from src.tools.document_parser import DocumentParser
 from src.tools.web_search import WebSearchTool
 from src.tools.vector_store import VectorStore
 from src.utils.llm_config import LLMConfig
+from src.utils.langfuse_config import LangfuseMonitoring
 from langgraph.checkpoint.memory import MemorySaver
+
+AGENT_VERSION = "2025-11-18-r3"
 
 # Configuration de la page
 st.set_page_config(
@@ -79,56 +81,133 @@ def init_session_state():
         st.session_state.current_step = "upload"
     if "agents_initialized" not in st.session_state:
         st.session_state.agents_initialized = False
+    if "agents_version" not in st.session_state:
+        st.session_state.agents_version = None
     if "interview_started" not in st.session_state:
         st.session_state.interview_started = False
     if "current_question" not in st.session_state:
         st.session_state.current_question = 0
 
+def reset_agents():
+    """Force la réinitialisation complète des agents"""
+    st.session_state.agents_initialized = False
+    st.session_state.agents_version = None
+    st.session_state.supervisor = None
+    st.session_state.vector_store = None
+    st.session_state.workflow_state = None
+    st.session_state.current_step = "upload"
+    st.session_state.interview_started = False
+    st.session_state.current_question = 0
+    st.rerun()
+
 def initialize_agents():
     """Initialise tous les agents et outils"""
-    if st.session_state.agents_initialized:
+    if st.session_state.agents_initialized and st.session_state.get("agents_version") == AGENT_VERSION:
         return
+    
+    # Si on a des agents mais une ancienne version, forcer la réinit
+    if st.session_state.agents_initialized and st.session_state.get("agents_version") != AGENT_VERSION:
+        st.session_state.agents_initialized = False
     
     with st.spinner("🚀 Initialisation des agents IA..."):
         try:
-            # Vérifier que Ollama est disponible
             from dotenv import load_dotenv
             load_dotenv()
-            
-            ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-            try:
-                response = requests.get(f"{ollama_url}/api/tags", timeout=2)
-                if response.status_code != 200:
-                    raise Exception("Ollama is not responding correctly")
-            except Exception as e:
+
+            if not os.getenv("OPENAI_API_KEY"):
                 st.error("""
-                ❌ **Ollama n'est pas en cours d'exécution !**
-                
-                Pour démarrer Ollama :
-                1. Ouvrez un terminal
-                2. Exécutez : `ollama serve`
-                3. Dans un autre terminal, téléchargez le modèle : `ollama pull llama3.1:8b`
-                4. Rechargez cette page
-                
-                Si Ollama n'est pas installé, téléchargez-le depuis : https://ollama.com
+                ❌ **Clé OpenAI manquante**
+
+                Configurez la variable d'environnement `OPENAI_API_KEY` (et
+                éventuellement `OPENAI_API_BASE` si vous utilisez un proxy/Azure)
+                puis rechargez la page.
                 """)
                 st.stop()
             
-            # LLM et embeddings
-            llm = LLMConfig.get_llm()
+            # S'assurer que les modèles configurés sont compatibles OpenAI
+            llm_model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+            if ":" in llm_model or "llama" in llm_model.lower():
+                st.info("""
+                ℹ️ Le modèle configuré (`LLM_MODEL`) n'est pas compatible avec OpenAI.
+                Passage automatique à `gpt-4o-mini`. Mettez à jour votre `.env` pour
+                éviter ce message.
+                """)
+                llm_model = "gpt-4o-mini"
+                os.environ["LLM_MODEL"] = llm_model
+
+            embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+            if "nomic" in embedding_model.lower():
+                st.info("""
+                ℹ️ Le modèle d'embeddings configuré n'est pas compatible OpenAI.
+                Passage automatique à `text-embedding-3-small`. Mettez à jour votre `.env`.
+                """)
+                embedding_model = "text-embedding-3-small"
+                os.environ["EMBEDDING_MODEL"] = embedding_model
+            
+            # Monitoring Langfuse (obligatoire)
+            langfuse_monitor = None
+            langfuse_keys_present = os.getenv("LANGFUSE_PUBLIC_KEY") and os.getenv("LANGFUSE_SECRET_KEY")
+            if not langfuse_keys_present:
+                st.error("❌ Monitoring Langfuse requis. Veuillez définir LANGFUSE_PUBLIC_KEY et LANGFUSE_SECRET_KEY dans votre environnement.")
+                st.stop()
+            try:
+                langfuse_monitor = LangfuseMonitoring()
+            except Exception as monitor_error:
+                st.error(f"❌ Impossible d'initialiser Langfuse: {monitor_error}")
+                st.stop()
+            
+            # Embeddings
             embeddings = LLMConfig.get_embeddings()
             
             # Outils
             web_search = WebSearchTool()
             vector_store = VectorStore(embeddings)
             
-            # Agents
+            # Créer un LLM avec callback Langfuse pour chaque agent
+            # Le callback doit être attaché directement au LLM pour capturer les outputs
+            user_id = os.getenv("LANGFUSE_USER_ID", "anonymous_user")
+            
+            # Créer les callbacks handlers
+            cv_handler = langfuse_monitor.get_callback_handler("cv_analyzer", user_id)
+            jd_handler = langfuse_monitor.get_callback_handler("jd_analyzer", user_id)
+            company_handler = langfuse_monitor.get_callback_handler("company_researcher", user_id)
+            question_handler = langfuse_monitor.get_callback_handler("question_generator", user_id)
+            coach_handler = langfuse_monitor.get_callback_handler("interview_coach", user_id)
+            
+            # Créer un LLM avec callback pour chaque agent
+            llm_cv = LLMConfig.get_llm(callbacks=[cv_handler])
+            llm_jd = LLMConfig.get_llm(callbacks=[jd_handler])
+            llm_company = LLMConfig.get_llm(callbacks=[company_handler])
+            llm_question = LLMConfig.get_llm(callbacks=[question_handler])
+            llm_coach = LLMConfig.get_llm(callbacks=[coach_handler])
+            
             agents = {
-                "cv_analyzer": CVAnalyzerAgent(llm),
-                "jd_analyzer": JDAnalyzerAgent(llm),
-                "company_researcher": CompanyResearcherAgent(llm, web_search),
-                "question_generator": QuestionGeneratorAgent(llm),
-                "interview_coach": InterviewCoachAgent(llm)
+                "cv_analyzer": CVAnalyzerAgent(
+                    llm_cv, 
+                    callbacks=[cv_handler],
+                    langfuse_monitor=langfuse_monitor
+                ),
+                "jd_analyzer": JDAnalyzerAgent(
+                    llm_jd, 
+                    callbacks=[jd_handler],
+                    langfuse_monitor=langfuse_monitor
+                ),
+                "company_researcher": CompanyResearcherAgent(
+                    llm_company, 
+                    web_search, 
+                    callbacks=[company_handler],
+                    langfuse_monitor=langfuse_monitor
+                ),
+                "question_generator": QuestionGeneratorAgent(
+                    llm_question, 
+                    callbacks=[question_handler],
+                    langfuse_monitor=langfuse_monitor
+                ),
+                "interview_coach": InterviewCoachAgent(
+                    llm_coach, 
+                    callbacks=[coach_handler],
+                    langfuse_monitor=langfuse_monitor
+                )
             }
             
             # Memory saver - utiliser MemorySaver au lieu de SqliteSaver pour éviter le problème du context manager
@@ -146,7 +225,9 @@ def initialize_agents():
             # Stocker dans session state
             st.session_state.supervisor = supervisor
             st.session_state.vector_store = vector_store
+            st.session_state.langfuse_monitor = langfuse_monitor
             st.session_state.agents_initialized = True
+            st.session_state.agents_version = AGENT_VERSION
             
             st.success("✅ Agents initialisés avec succès!")
             
@@ -322,6 +403,18 @@ def analysis_section():
                                 }
                                 status_text.text(step_names.get(node_name, f"Exécution de {node_name}..."))
                             
+                            # Monitoring Langfuse
+                            langfuse_monitor = st.session_state.get("langfuse_monitor")
+                            if langfuse_monitor:
+                                try:
+                                    langfuse_monitor.log_workflow_step(
+                                        step_name=node_name,
+                                        state=node_state,
+                                        success=not bool(node_state.get("error"))
+                                    )
+                                except Exception:
+                                    pass
+                            
                             # Debug: afficher le nœud exécuté et son état (masqué par défaut)
                             # with st.expander(f"🔍 Debug: Node {node_name}", expanded=False):
                             #     st.json({
@@ -336,7 +429,7 @@ def analysis_section():
                             # Arrêter au point de validation humaine
                             if node_state.get("next_step") == "awaiting_human_input":
                                 break
-                
+            
                 progress_bar.progress(1.0)
                 status_text.text("✅ Analyse terminée !")
                 
@@ -363,14 +456,28 @@ def analysis_section():
                     with st.expander("🔍 Debug Info", expanded=False):
                         st.json(debug_info)
                         st.json({k: type(v).__name__ for k, v in st.session_state.workflow_state.items()})
+                        st.caption("Aperçu CV Analysis")
+                        st.json(st.session_state.workflow_state.get("cv_analysis", {}))
+                        st.caption("Aperçu JD Analysis")
+                        st.json(st.session_state.workflow_state.get("jd_analysis", {}))
                         # Afficher l'erreur si présente
                         if st.session_state.workflow_state.get("error"):
                             st.error(f"Erreur dans le workflow: {st.session_state.workflow_state.get('error')}")
-        
+            
             except Exception as e:
                 st.error(f"❌ Erreur: {str(e)}")
                 import traceback
                 st.error(f"Traceback: {traceback.format_exc()}")
+                langfuse_monitor = st.session_state.get("langfuse_monitor")
+                if langfuse_monitor:
+                    try:
+                        langfuse_monitor.log_workflow_step(
+                            step_name="analysis_section_error",
+                            state={"error": str(e)},
+                            success=False
+                        )
+                    except Exception:
+                        pass
                 return
     else:
         # L'analyse est déjà faite, utiliser l'état existant
@@ -532,13 +639,18 @@ def tips_section():
     if not state.get("general_tips"):
         with st.spinner("📝 Génération de conseils personnalisés..."):
             supervisor = st.session_state.supervisor
-            config = {"configurable": {"thread_id": "interview_prep_1"}}
+            config = {
+                "configurable": {"thread_id": "interview_prep_1"},
+                "recursion_limit": 50,
+            }
             
             # Continuer le workflow
             # Avec MemorySaver, on peut utiliser le graph directement sans context manager
             graph = supervisor.get_graph()
             for result in graph.stream(state, config):
                 st.session_state.workflow_state = list(result.values())[0]
+                if st.session_state.workflow_state.get("general_tips"):
+                    break
             
             state = st.session_state.workflow_state
     
@@ -561,7 +673,15 @@ def tips_section():
             for concern in concerns:
                 if isinstance(concern, dict):
                     st.warning(f"**Préoccupation:** {concern.get('concern', '')}")
-                    st.info(f"**Comment l'adresser:** {concern.get('how_to_address', '')}")
+                    how_to = (
+                        concern.get("how_to_address")
+                        or concern.get("solution")
+                        or concern.get("action")
+                        or concern.get("advice")
+                        or ""
+                    )
+                    if how_to:
+                        st.info(f"**Comment l'adresser:** {how_to}")
                 else:
                     st.warning(concern)
         
@@ -573,8 +693,12 @@ def tips_section():
             st.info(tips.get("dress_code", "Tenue professionnelle adaptée au secteur"))
             
             st.markdown("### 🚫 Erreurs à Éviter")
-            for mistake in tips.get("common_mistakes", []):
-                st.markdown(f"- {mistake}")
+            mistakes = tips.get("common_mistakes") or tips.get("mistakes") or []
+            if mistakes:
+                for mistake in mistakes:
+                    st.markdown(f"- {mistake}")
+            else:
+                st.caption("Pas d'erreurs spécifiques remontées.")
         
         with col2:
             st.markdown("### 🤝 Langage Corporel")
@@ -850,8 +974,15 @@ def main():
     # Initialiser la session
     init_session_state()
     
+    # Après rechargement complet, garantir que current_step existe toujours
+    if "current_step" not in st.session_state or st.session_state.current_step is None:
+        st.session_state.current_step = "upload"
+    
     # Sidebar
     with st.sidebar:
+        if st.button("♻️ Réinitialiser les agents IA", use_container_width=True):
+            reset_agents()
+        
         st.markdown("## 🎯 Navigation")
         
         # Indicateur de progression

@@ -33,8 +33,6 @@ class InterviewPrepSupervisor:
         workflow = StateGraph(InterviewPrepState)
         
         # Ajouter les nœuds
-        workflow.add_node("analyze_cv", self.analyze_cv_node)
-        workflow.add_node("analyze_jd", self.analyze_jd_node)
         workflow.add_node("research_company", self.research_company_node)
         workflow.add_node("generate_questions", self.generate_questions_node)
         workflow.add_node("human_review", self.human_review_node)
@@ -44,8 +42,8 @@ class InterviewPrepSupervisor:
         
         # Définir le flux
         # Exécuter analyze_cv et analyze_jd en parallèle pour gagner du temps
-        workflow.set_entry_point("analyze_parallel")
         workflow.add_node("analyze_parallel", self.analyze_parallel_node)
+        workflow.set_entry_point("analyze_parallel")
         
         workflow.add_edge("analyze_parallel", "research_company")
         workflow.add_edge("research_company", "generate_questions")

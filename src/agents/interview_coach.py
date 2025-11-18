@@ -1,9 +1,36 @@
-from typing import Dict
+from typing import Dict, Optional, List
 import json
+from src.utils.json_utils import safe_json_loads
 
 class InterviewCoachAgent:
-    def __init__(self, llm):
+    def __init__(self, llm, callbacks: Optional[List] = None, langfuse_monitor=None):
         self.llm = llm
+        self.callbacks = callbacks or []
+        self.langfuse_monitor = langfuse_monitor
+
+    def _extract_json_payload(self, raw_text: str) -> str:
+        """Nettoie la réponse du LLM pour ne garder que le JSON"""
+        cleaned = (raw_text or "").strip()
+        if not cleaned:
+            raise ValueError("Réponse LLM vide - impossibilité de parser.")
+        
+        if "```json" in cleaned:
+            cleaned = cleaned.split("```json", 1)[1]
+            cleaned = cleaned.split("```", 1)[0].strip()
+        elif "```" in cleaned:
+            cleaned = cleaned.split("```", 1)[1]
+            cleaned = cleaned.split("```", 1)[0].strip()
+
+        start_idx = cleaned.find("{")
+        end_idx = cleaned.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            cleaned = cleaned[start_idx : end_idx + 1]
+
+        return cleaned
+
+    def _parse_json(self, payload: str) -> Dict:
+        """Parse un JSON en tolérant quelques erreurs courantes des LLM"""
+        return safe_json_loads(payload)
         
     def evaluate_answer(self, question: str, answer: str, 
                        context: Dict) -> Dict:
@@ -32,8 +59,44 @@ Sois constructif, spécifique et encourageant.
 JSON:"""
 
         try:
-            response = self.llm.invoke(prompt)
-            feedback = json.loads(response)
+            config = {"callbacks": self.callbacks} if self.callbacks else {}
+            
+            # Utiliser le callback comme context manager si possible
+            if self.callbacks and len(self.callbacks) > 0:
+                callback = self.callbacks[0]
+                if hasattr(callback, '__enter__') and hasattr(callback, '__exit__'):
+                    with callback:
+                        response = self.llm.invoke(prompt, config=config)
+                else:
+                    response = self.llm.invoke(prompt, config=config)
+            else:
+                response = self.llm.invoke(prompt, config=config)
+            
+            # Flush les callbacks pour s'assurer que les données sont envoyées à Langfuse
+            if self.callbacks:
+                for callback in self.callbacks:
+                    if hasattr(callback, 'flush'):
+                        try:
+                            callback.flush()
+                        except Exception:
+                            pass
+            
+            response_text = (
+                response.content if hasattr(response, "content") else str(response)
+            )
+            payload = self._extract_json_payload(response_text)
+            feedback = self._parse_json(payload)
+            
+            # Logger manuellement l'output dans Langfuse si disponible
+            if self.langfuse_monitor:
+                try:
+                    self.langfuse_monitor.log_agent_execution(
+                        agent_name="interview_coach_evaluate",
+                        input_data={"question": question[:200], "answer": answer[:500]},
+                        output_data={"feedback": feedback}
+                    )
+                except Exception:
+                    pass
             
             return {
                 "success": True,
@@ -65,8 +128,44 @@ Fournis en JSON:
 JSON:"""
 
         try:
-            response = self.llm.invoke(prompt)
-            tips = json.loads(response)
+            config = {"callbacks": self.callbacks} if self.callbacks else {}
+            
+            # Utiliser le callback comme context manager si possible
+            if self.callbacks and len(self.callbacks) > 0:
+                callback = self.callbacks[0]
+                if hasattr(callback, '__enter__') and hasattr(callback, '__exit__'):
+                    with callback:
+                        response = self.llm.invoke(prompt, config=config)
+                else:
+                    response = self.llm.invoke(prompt, config=config)
+            else:
+                response = self.llm.invoke(prompt, config=config)
+            
+            # Flush les callbacks pour s'assurer que les données sont envoyées à Langfuse
+            if self.callbacks:
+                for callback in self.callbacks:
+                    if hasattr(callback, 'flush'):
+                        try:
+                            callback.flush()
+                        except Exception:
+                            pass
+            
+            response_text = (
+                response.content if hasattr(response, "content") else str(response)
+            )
+            payload = self._extract_json_payload(response_text)
+            tips = self._parse_json(payload)
+            
+            # Logger manuellement l'output dans Langfuse si disponible
+            if self.langfuse_monitor:
+                try:
+                    self.langfuse_monitor.log_agent_execution(
+                        agent_name="interview_coach_tips",
+                        input_data={"cv_analysis": str(cv_analysis)[:500], "jd_analysis": str(jd_analysis)[:500]},
+                        output_data={"tips": tips}
+                    )
+                except Exception:
+                    pass
             
             return {
                 "success": True,

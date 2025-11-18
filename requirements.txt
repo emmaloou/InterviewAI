@@ -1,13 +1,17 @@
 # Core Framework
-langchain==0.1.0
-langgraph==0.0.20
-langchain-community==0.0.10
-langfuse==2.0.1
-langgraph
+langchain==0.2.16
+langgraph==0.2.28
+langchain-community==0.2.16
+langchain-chroma==0.1.2
+langchain-openai==0.1.7
+# Monitoring
+langfuse>=2.5.0
 
 # LLM Providers
-ollama==0.1.0
-#openai==1.0.0
+# openai client + tokenizer
+openai==1.51.0
+tiktoken==0.7.0
+json5==0.9.25
 #groq==0.4.0
 
 # Vector Store & Embeddings
@@ -21,8 +25,8 @@ python-docx==1.1.0
 pdfplumber==0.10.3
 
 # Web Tools
-tavily-python==0.3.0
-requests==2.31.0
+tavily-python==0.5.0
+requests==2.32.3
 beautifulsoup4==4.12.0
 
 # Web Framework
@@ -31,25 +35,25 @@ gradio==4.0.0
 
 # Utilities
 python-dotenv==1.0.0
-pydantic==2.5.0
-pydantic-settings==2.0.3
+pydantic==2.9.2
+pydantic-settings==2.5.2
 
 # Database
 sqlalchemy==2.0.23
 
 # Monitoring
 # langchain 0.1.0 requires langsmith>=0.0.77,<0.1.0 — remonter la version pour éviter un conflit
-langsmith==0.0.77
+langsmith==0.1.130
 
 # Testing
-pytest==7.4.3
-pytest-cov==4.1.0
-pytest-asyncio==0.21.0
+pytest==8.3.3
+pytest-cov==5.0.0
+pytest-asyncio==0.23.6
 
 # Development
-black==23.12.0
-flake8==6.1.0
-mypy==1.7.1
+black==24.4.2
+flake8==7.1.0
+mypy==1.11.1
 
 # Logging
 loguru==0.7.2

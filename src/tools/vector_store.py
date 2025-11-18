@@ -1,13 +1,14 @@
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from typing import List,Dict
-import os
+from chromadb.config import Settings
+from typing import List, Dict
 
 class VectorStore:
     def __init__(self, embeddings, persist_directory="./data/vector_db"):
         self.embeddings = embeddings
         self.persist_directory = persist_directory
+        self.client_settings = Settings(anonymized_telemetry=False)
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
             chunk_overlap=200
@@ -18,7 +19,8 @@ class VectorStore:
         return Chroma(
             collection_name=collection_name,
             embedding_function=self.embeddings,
-            persist_directory=self.persist_directory
+            persist_directory=self.persist_directory,
+            client_settings=self.client_settings
         )
     
     def add_documents(self, collection_name: str, texts: List[str], metadatas: List[Dict] = None):

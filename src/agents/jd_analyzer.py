@@ -1,10 +1,12 @@
 from langchain.prompts import PromptTemplate
-from typing import Dict
-import json
+from typing import Dict, Optional, List
+from src.utils.json_utils import safe_json_loads
 
 class JDAnalyzerAgent:
-    def __init__(self, llm):
+    def __init__(self, llm, callbacks: Optional[List] = None, langfuse_monitor=None):
         self.llm = llm
+        self.callbacks = callbacks or []
+        self.langfuse_monitor = langfuse_monitor
         self.prompt = PromptTemplate.from_template(
             """Analyse cette description de poste et retourne UNIQUEMENT un JSON valide (sans texte avant/après):
 {jd_text}
@@ -14,40 +16,75 @@ JSON avec: job_title, seniority_level (junior/mid/senior), required_skills (list
 JSON:"""
         )
     
+    def _extract_json_payload(self, raw_text: str) -> str:
+        """Nettoie la réponse du LLM pour extraire uniquement le JSON"""
+        cleaned = (raw_text or "").strip()
+        if not cleaned:
+            raise ValueError("Réponse LLM vide - impossibilité de parser le JSON.")
+
+        if "```json" in cleaned:
+            cleaned = cleaned.split("```json", 1)[1]
+            cleaned = cleaned.split("```", 1)[0].strip()
+        elif "```" in cleaned:
+            cleaned = cleaned.split("```", 1)[1]
+            cleaned = cleaned.split("```", 1)[0].strip()
+
+        start_idx = cleaned.find("{")
+        end_idx = cleaned.rfind("}")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            cleaned = cleaned[start_idx : end_idx + 1]
+
+        return cleaned
+
     def analyze(self, jd_text: str) -> Dict:
         """Analyse une description de poste"""
         try:
             chain = self.prompt | self.llm
-            response = chain.invoke({"jd_text": jd_text})
+            config = {"callbacks": self.callbacks} if self.callbacks else {}
+            
+            # Utiliser le callback comme context manager si possible
+            if self.callbacks and len(self.callbacks) > 0:
+                callback = self.callbacks[0]
+                if hasattr(callback, '__enter__') and hasattr(callback, '__exit__'):
+                    with callback:
+                        response = chain.invoke({"jd_text": jd_text}, config=config)
+                else:
+                    response = chain.invoke({"jd_text": jd_text}, config=config)
+            else:
+                response = chain.invoke({"jd_text": jd_text}, config=config)
+            
+            # Flush les callbacks pour s'assurer que les données sont envoyées à Langfuse
+            if self.callbacks:
+                for callback in self.callbacks:
+                    if hasattr(callback, 'flush'):
+                        try:
+                            callback.flush()
+                        except Exception:
+                            pass
             
             # Nettoyer la réponse
-            response_text = response if isinstance(response, str) else str(response)
+            response_text = (
+                response.content if hasattr(response, "content") else str(response)
+            )
             
-            # Extraire le JSON
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            # Logger manuellement l'output dans Langfuse si disponible
+            if self.langfuse_monitor:
+                try:
+                    self.langfuse_monitor.log_agent_execution(
+                        agent_name="jd_analyzer",
+                        input_data={"jd_text": jd_text[:500]},
+                        output_data={"response": response_text[:2000]}
+                    )
+                except Exception:
+                    pass
             
-            analysis = json.loads(response_text)
+            # Extraire et parser le JSON
+            payload = self._extract_json_payload(response_text)
+            analysis = safe_json_loads(payload)
             
             return {
                 "success": True,
                 "analysis": analysis
-            }
-        except json.JSONDecodeError:
-            return {
-                "success": True,
-                "analysis": {
-                    "job_title": "Poste en cours d'analyse",
-                    "seniority_level": "À déterminer",
-                    "required_skills": ["Analyse en cours..."],
-                    "preferred_skills": [],
-                    "experience_required": "À déterminer",
-                    "key_responsibilities": ["Analyse en cours..."],
-                    "company_culture": "Analyse en cours...",
-                    "summary": "Analyse de la description de poste en cours."
-                }
             }
         except Exception as e:
             return {
